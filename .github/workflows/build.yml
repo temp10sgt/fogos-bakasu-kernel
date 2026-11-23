@@ -18,6 +18,10 @@ on:
         description: "Forced localversion suffix (must match ROM modules)"
         type: string
         default: "/d526d46d"
+      rom_url:
+        description: "Direct URL to the ROM zip. If set, boot.img is produced."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -169,17 +173,28 @@ jobs:
           cd AnyKernel3
           zip -r9 "../WakacaW-bakasu-fogos.zip" . -x "*.git*" -x "*.github*" -x "README*" -x "*.zip"
 
-      - name: Repack boot image
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Fetch stock boot.img from ROM
+        if: inputs.rom_url != ''
         run: |
           set -euo pipefail
+          curl -fL --retry 3 --retry-delay 5 -o rom.zip "${{ inputs.rom_url }}"
+          unzip -o -q rom.zip payload.bin
+          rm -f rom.zip
+          curl -fsSL -o pdg.tar.gz \
+            "https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz"
+          tar -xzf pdg.tar.gz payload-dumper-go
           mkdir -p stock
-          gh release download stock-boot -R "$GITHUB_REPOSITORY" -p boot_a.img -D stock --clobber
-          test -s stock/boot_a.img
-          sha256sum stock/boot_a.img
+          ./payload-dumper-go -p boot -o stock payload.bin
+          rm -f payload.bin pdg.tar.gz payload-dumper-go
+          test -s stock/boot.img
+          sha256sum stock/boot.img
+
+      - name: Repack boot image
+        if: inputs.rom_url != ''
+        run: |
+          set -euo pipefail
           python3 build/tools/repack_boot.py \
-            --base stock/boot_a.img \
+            --base stock/boot.img \
             --kernel kernel/out/arch/arm64/boot/Image \
             --out boot_bakasu-fogos.img
           sha256sum boot_bakasu-fogos.img

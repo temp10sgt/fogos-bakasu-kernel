@@ -59,19 +59,25 @@ Inputs:
 | `mode` | `patch` | `patch` = base commit + local patches, `branch` = upstream `lineage-24.0-bakasu` |
 | `susfs` | `true` | build SUSFS support |
 | `localversion` | `/d526d46d` | localversion suffix, keep it unless your ROM differs |
+| `rom_url` | *(empty)* | direct link to the ROM zip; when set, `boot.img` is produced as well |
 
 A build takes roughly 45 minutes.
 
 ## Outputs
 
 ```
-boot_bakasu-fogos.img      boot image, ready for fastboot
 WakacaW-bakasu-fogos.zip   AnyKernel3 package, ready for Kernel Flasher
+boot_bakasu-fogos.img      boot image for fastboot (only if rom_url is set)
 ```
 
-`boot_bakasu-fogos.img` is assembled from the stock boot image published in the
-`stock-boot` release of this repository (PixelOS 17.0, build 2026-11-18) plus the
-newly built kernel. The ramdisk, header and partition size are left untouched.
+The boot image is assembled from the stock `boot.img` inside the ROM you point
+`rom_url` at, plus the newly built kernel. The ramdisk, header and partition size
+are left untouched, so it matches exactly that ROM build.
+
+`rom_url` must be a **direct link** to the ROM zip (not a page with a download
+button). If your ROM is distributed through a page that requires a click or a
+login, use the AnyKernel3 zip instead — it repacks the boot image on the device
+using the phone's own copy.
 
 ## Installing
 
@@ -83,8 +89,8 @@ working image of the other slot as a fallback.
 
 ### Option B — boot image via fastboot
 
-`boot_bakasu-fogos.img` is built against the PixelOS 17.0 boot image from
-2026-11-18. If your device runs that build, flash it directly:
+Available only when the build was run with `rom_url` set, because the boot image
+needs the ramdisk from your exact ROM build.
 
 ```bash
 fastboot getvar current-slot
@@ -93,16 +99,12 @@ fastboot --set-active=a
 fastboot reboot
 ```
 
-If your ROM build differs, repack with the boot image from your own ROM so the
-ramdisk matches:
+If you built without `rom_url`, repack locally instead:
 
 ```bash
 payload-dumper-go -p boot payload.bin          # from your OTA zip
 python3 tools/repack_boot.py --base boot.img --kernel Image --out boot_bakasu.img
 ```
-
-`Image` is not part of the artifact set, but any build can be re-run locally or
-the kernel extracted from `boot_bakasu-fogos.img` if you need the raw image.
 
 Do **not** use `fastboot flash boot` without a suffix: on A/B devices that
 writes to the active slot and removes your fallback.
