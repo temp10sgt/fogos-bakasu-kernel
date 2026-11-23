@@ -1,0 +1,181 @@
+name: Build BakaSU + SUSFS kernel (fogos)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "patch = base commit + local patches, branch = upstream lineage-24.0-bakasu"
+        type: choice
+        options:
+          - patch
+          - branch
+        default: patch
+      susfs:
+        description: "Enable SUSFS (root hiding)"
+        type: boolean
+        default: true
+      localversion:
+        description: "Forced localversion suffix (must match ROM modules)"
+        type: string
+        default: "/d526d46d"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Checkout build recipe
+        uses: actions/checkout@v4
+        with:
+          path: build
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: moto-fogos/android_kernel_motorola_sm6375
+          ref: ${{ inputs.mode == 'branch' && 'lineage-24.0-bakasu' || 'd526d46d78e74eb9c0580d6a712ebb5133f3454f' }}
+          path: kernel
+          fetch-depth: 1
+
+      - name: Apply BakaSU patches
+        if: inputs.mode == 'patch'
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          P="$GITHUB_WORKSPACE/build/patches"
+          for f in 01-hook.patch 02-driver.patch; do
+            test -s "$P/$f" || { echo "::error::missing patch $f"; exit 1; }
+            git apply "$P/$f"
+          done
+          if [ "${{ inputs.susfs }}" = "true" ]; then
+            test -s "$P/03-susfs.patch" || { echo "::error::missing susfs patch"; exit 1; }
+            git apply "$P/03-susfs.patch"
+          fi
+          echo "patches applied"
+
+      # Vendor bug workaround: split_pad_vma() case 1 deliberately creates a VMA
+      # that is entirely padding, but vma_pad_pages() asserts nr_pad < nr_pages
+      # and spams WARN on every /proc/<pid>/maps read (CachedAppOptimizer).
+      # Relaxing the check also makes vma_data_pages() correct (0), so
+      # fault-around is skipped inside the padding area.
+      - name: Fix vendor pgsize_migration false-positive WARN
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          F=mm/pgsize_migration.c
+          grep -q 'if (WARN_ON(nr_pad >= nr_pages))' "$F"
+          sed -i 's/if (WARN_ON(nr_pad >= nr_pages))/if (WARN_ON_ONCE(nr_pad > nr_pages))/' "$F"
+          grep -n 'WARN_ON_ONCE(nr_pad > nr_pages)' "$F"
+
+      - name: Set localversion and drop git metadata
+        working-directory: kernel
+        run: |
+          rm -rf .git
+          if [ -n "${{ inputs.localversion }}" ]; then
+            printf '%s' "${{ inputs.localversion }}" > .scmversion
+          fi
+
+      - name: Install AOSP clang r596125 (22.0.2, matches the ROM)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/clang.tar.gz" \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android17-release/clang-r596125.tar.gz"
+          mkdir -p "$GITHUB_WORKSPACE/clang"
+          tar -xzf "$RUNNER_TEMP/clang.tar.gz" -C "$GITHUB_WORKSPACE/clang"
+          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/clang/bin/clang" --version | head -1
+
+      - name: Configure kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp "$GITHUB_WORKSPACE/build/config/running.config" out/.config
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_MANUAL_HOOK=y"
+            echo "CONFIG_TMPFS_XATTR=y"
+            if [ "${{ inputs.susfs }}" = "true" ]; then
+              echo "CONFIG_KSU_SUSFS=y"
+              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+              echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+            fi
+          } > "$RUNNER_TEMP/bakasu.config"
+          scripts/kconfig/merge_config.sh -m -O out out/.config "$RUNNER_TEMP/bakasu.config"
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+
+          REL="$(make -s O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 kernelrelease)"
+          echo "kernelrelease=$REL"
+          EXPECTED="5.4.302-WKCW${{ inputs.localversion }}"
+          if [ "$REL" != "$EXPECTED" ]; then
+            echo "::error::kernelrelease mismatch: got '$REL', expected '$EXPECTED'"
+            exit 1
+          fi
+
+          for opt in CONFIG_LTO_CLANG CONFIG_CFI_CLANG CONFIG_CFI_CLANG_SHADOW \
+                     CONFIG_MODVERSIONS CONFIG_SHADOW_CALL_STACK CONFIG_KSU \
+                     CONFIG_KSU_MANUAL_HOOK CONFIG_TMPFS_XATTR; do
+            if ! grep -q "^$opt=y" out/.config; then
+              echo "::error::$opt is not enabled"
+              exit 1
+            fi
+          done
+          if [ "${{ inputs.susfs }}" = "true" ] && ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
+            echo "::error::CONFIG_KSU_SUSFS is not enabled"
+            exit 1
+          fi
+
+          cp out/.config out/config.txt
+          grep -E "CONFIG_LTO|CONFIG_CFI|CONFIG_MODVERSIONS|CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_SUSFS|CONFIG_TMPFS_XATTR" out/config.txt
+
+      - name: Generate UAPI headers (BakaSU preinit)
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 headers_install INSTALL_HDR_PATH="$PWD/out/usr"
+          test -f out/usr/include/linux/unistd.h
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 -j"$(nproc)"
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version"
+          if ! strings out/arch/arm64/boot/Image | grep -q "__cfi_slowpath"; then
+            echo "::error::CFI symbols missing in Image"
+            exit 1
+          fi
+
+      - name: Package AnyKernel3
+        run: |
+          set -euo pipefail
+          git clone --depth=1 -b master https://github.com/heybyben/AnyKernel3-hey AnyKernel3
+          cp kernel/out/arch/arm64/boot/Image AnyKernel3/Image
+          cd AnyKernel3
+          zip -r9 "../WakacaW-bakasu-fogos.zip" . -x "*.git*" -x "*.github*" -x "README*" -x "*.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bakasu-fogos
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/config.txt
+            kernel/out/Module.symvers
+            WakacaW-bakasu-fogos.zip
+          if-no-files-found: error
