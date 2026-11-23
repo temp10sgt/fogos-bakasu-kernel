@@ -65,11 +65,13 @@ A build takes roughly 45 minutes.
 ## Outputs
 
 ```
-WakacaW-bakasu-fogos.zip   AnyKernel3 package (flash with Kernel Flasher)
-Image                      raw kernel
-config.txt                 final .config
-Module.symvers             exported symbols + CRCs
+boot_bakasu-fogos.img      boot image, ready for fastboot
+WakacaW-bakasu-fogos.zip   AnyKernel3 package, ready for Kernel Flasher
 ```
+
+`boot_bakasu-fogos.img` is assembled from the stock boot image published in the
+`stock-boot` release of this repository (PixelOS 17.0, build 2026-11-18) plus the
+newly built kernel. The ramdisk, header and partition size are left untouched.
 
 ## Installing
 
@@ -79,40 +81,38 @@ Flash `WakacaW-bakasu-fogos.zip` with an on-device kernel flasher such as
 Kernel Flasher. The zip patches the **currently active** boot slot, so keep a
 working image of the other slot as a fallback.
 
-### Option B — repack your own boot.img
+### Option B — boot image via fastboot
 
-This is the safer route and the only one that works from fastboot.
+`boot_bakasu-fogos.img` is built against the PixelOS 17.0 boot image from
+2026-11-18. If your device runs that build, flash it directly:
 
-1. Extract the stock `boot.img` from your ROM package.
-   For an OTA zip, `boot.img` lives inside `payload.bin`
-   (use `payload-dumper-go -p boot`).
-2. Repack it with the freshly built kernel:
+```bash
+fastboot getvar current-slot
+fastboot flash boot_a boot_bakasu-fogos.img   # use boot_b if current slot is a
+fastboot --set-active=a
+fastboot reboot
+```
 
-   ```bash
-   python3 tools/repack_boot.py --base boot.img --kernel Image --out boot_bakasu.img
-   ```
+If your ROM build differs, repack with the boot image from your own ROM so the
+ramdisk matches:
 
-   The script keeps the original ramdisk, header and partition size, and
-   rewrites the AVB footer offsets.
+```bash
+payload-dumper-go -p boot payload.bin          # from your OTA zip
+python3 tools/repack_boot.py --base boot.img --kernel Image --out boot_bakasu.img
+```
 
-3. Flash to the **inactive** slot:
+`Image` is not part of the artifact set, but any build can be re-run locally or
+the kernel extracted from `boot_bakasu-fogos.img` if you need the raw image.
 
-   ```bash
-   fastboot getvar current-slot
-   fastboot flash boot_a boot_bakasu.img   # use boot_b if current slot is a
-   fastboot --set-active=a
-   fastboot reboot
-   ```
+Do **not** use `fastboot flash boot` without a suffix: on A/B devices that
+writes to the active slot and removes your fallback.
 
-   Do **not** use `fastboot flash boot` without a suffix: on A/B devices that
-   writes to the active slot and removes your fallback.
+To roll back, switch slots again — no reflash needed:
 
-4. To roll back, switch slots again — no reflash needed:
-
-   ```bash
-   fastboot --set-active=b
-   fastboot reboot
-   ```
+```bash
+fastboot --set-active=b
+fastboot reboot
+```
 
 ## Verifying a build
 

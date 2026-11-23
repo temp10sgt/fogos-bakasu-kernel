@@ -169,13 +169,36 @@ jobs:
           cd AnyKernel3
           zip -r9 "../WakacaW-bakasu-fogos.zip" . -x "*.git*" -x "*.github*" -x "README*" -x "*.zip"
 
+      - name: Repack boot image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p stock
+          gh release download stock-boot -R "$GITHUB_REPOSITORY" -p boot_a.img -D stock --clobber
+          test -s stock/boot_a.img
+          sha256sum stock/boot_a.img
+          python3 build/tools/repack_boot.py \
+            --base stock/boot_a.img \
+            --kernel kernel/out/arch/arm64/boot/Image \
+            --out boot_bakasu-fogos.img
+          sha256sum boot_bakasu-fogos.img
+          python3 - boot_bakasu-fogos.img kernel/out/arch/arm64/boot/Image <<'PY'
+          import sys, struct
+          boot, img = sys.argv[1], sys.argv[2]
+          d = open(boot, "rb").read()
+          k = open(img, "rb").read()
+          ks = struct.unpack_from("<I", d, 8)[0]
+          assert ks == len(k), f"kernel_size {ks} != {len(k)}"
+          assert d[4096:4096 + ks] == k, "kernel inside boot.img differs from Image"
+          print("boot.img kernel verified")
+          PY
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: bakasu-fogos
           path: |
-            kernel/out/arch/arm64/boot/Image
-            kernel/out/config.txt
-            kernel/out/Module.symvers
+            boot_bakasu-fogos.img
             WakacaW-bakasu-fogos.zip
           if-no-files-found: error
